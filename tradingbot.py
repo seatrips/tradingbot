@@ -10,6 +10,8 @@ from io import BytesIO
 import json
 import sqlite3
 import os
+import signal
+import sys
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -220,39 +222,7 @@ def calculate_buy_amount(exchange, current_price):
     logger.info(f"Calculated buy amount: {buy_amount_btc:.8f} BTC (90% of {usdt_balance:.2f} USDT)")
     return buy_amount_btc
 
-# Initialize the Phemex exchange
-exchange = initialize_exchange()
-
-# Check initial balances
-initial_usdt_balance = get_usdt_balance(exchange)
-initial_btc_balance = get_btc_balance(exchange)
-
-min_usdt_balance = 10  # Minimum USDT balance
-min_btc_balance = 0.0001  # Minimum BTC balance
-
-if initial_usdt_balance is None or initial_btc_balance is None:
-    logger.error("Unable to fetch initial balances. Exiting program.")
-    exit()
-
-if initial_usdt_balance < min_usdt_balance and initial_btc_balance < min_btc_balance:
-    logger.error(f"Insufficient balance. USDT: {initial_usdt_balance:.2f}, BTC: {initial_btc_balance:.8f}")
-    logger.error(f"Minimum required: USDT: {min_usdt_balance} or BTC: {min_btc_balance}")
-    logger.error("Exiting program.")
-    exit()
-
-if initial_usdt_balance < min_usdt_balance:
-    logger.warning(f"Low USDT balance ({initial_usdt_balance:.2f}), but sufficient BTC balance ({initial_btc_balance:.8f}). Continuing to run.")
-elif initial_btc_balance < min_btc_balance:
-    logger.warning(f"Low BTC balance ({initial_btc_balance:.8f}), but sufficient USDT balance ({initial_usdt_balance:.2f}). Continuing to run.")
-else:
-    logger.info(f"Initial USDT balance: {initial_usdt_balance:.2f} USDT")
-    logger.info(f"Initial BTC balance: {initial_btc_balance:.8f} BTC")
-
-symbol = 'BTC/USDT'
-timeframe = '1m'
-take_profit = 0.0018  # 0.18% take profit
-
-def fetch_ohlcv(symbol, timeframe, limit):
+def fetch_ohlcv(exchange, symbol, timeframe, limit):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -280,7 +250,7 @@ def check_trading_conditions(df, support_levels):
     else:
         return None
 
-def place_order(side, amount, price):
+def place_order(exchange, symbol, side, amount, price):
     try:
         order = exchange.create_market_order(symbol, side, amount)
         logger.info(f"{side.capitalize()} order placed: {order}")
@@ -289,19 +259,59 @@ def place_order(side, amount, price):
         logger.error(f"Error placing {side} order: {e}")
         return None
 
+# Global variable to control the main loop
+running = True
+
+def signal_handler(sig, frame):
+    global running
+    print('You pressed Ctrl+C!')
+    running = False
+
+signal.signal(signal.SIGINT, signal_handler)
+
+def cleanup(exchange, stats):
+    logger.info("Performing cleanup before exit...")
+    
+    # Close any open positions
+    trade_data = load_trade_data()
+    if trade_data and trade_data['position'] == 'long':
+        current_amount = trade_data['current_amount']
+        current_price = exchange.fetch_ticker('BTC/USDT')['last']
+        logger.info(f"Closing open position: selling {current_amount:.8f} BTC at {current_price}")
+        place_order(exchange, 'BTC/USDT', 'sell', current_amount, current_price)
+    
+    # Save final statistics
+    final_stats = stats.get_stats()
+    logger.info("Final trading statistics:")
+    for key, value in final_stats.items():
+        logger.info(f"{key}: {value}")
+    
+    # You might want to save these stats to a file or database here
+    
+    logger.info("Cleanup complete. Exiting.")
+
 def main():
+    global running
+    
+    # Initialize the Phemex exchange
+    exchange = initialize_exchange()
+
+    symbol = 'BTC/USDT'
+    timeframe = '1m'
+    take_profit = 0.0018  # 0.18% take profit
+    stop_loss = 0.0006  # 0.06% stop loss
+
+    stats = TradingStats()
+    last_log_time = datetime.now()
+
     logger.info("Trading bot is running...")
     logger.info(f"Trading {symbol} on {timeframe} timeframe")
     logger.info(f"Using EMA24/SMA67 crossover, RSI oversold, and horizontal support bounce strategy")
     logger.info(f"Take profit set at {take_profit*100}%")
-    logger.info(f"Stop loss set at 0.06%")
+    logger.info(f"Stop loss set at {stop_loss*100}%")
     logger.info(f"Buy amount: 90% of available USDT balance")
 
-    stats = TradingStats()
-    stop_loss = 0.0006  # 0.06% stop loss
-    last_log_time = datetime.now()
-
-    while True:
+    while running:
         try:
             # Load trade data at the start of each iteration
             trade_data = load_trade_data()
@@ -318,7 +328,7 @@ def main():
                 current_amount = 0
 
             # Fetch latest data
-            df = fetch_ohlcv(symbol, timeframe, limit=100)
+            df = fetch_ohlcv(exchange, symbol, timeframe, limit=100)
             df = calculate_indicators(df)
             support_levels = detect_horizontal_support(df)
 
@@ -336,7 +346,7 @@ def main():
                 buy_amount = calculate_buy_amount(exchange, current_price)
                 if buy_amount is not None and buy_amount > 0:
                     logger.info(f"Buy signal detected ({signal}). Attempting to place buy order for {buy_amount:.8f} BTC...")
-                    order = place_order('buy', buy_amount, current_price)
+                    order = place_order(exchange, symbol, 'buy', buy_amount, current_price)
                     if order:
                         position = 'long'
                         entry_price = current_price
@@ -371,7 +381,7 @@ def main():
                         current_amount = actual_btc_balance
                     if current_amount > 0:
                         logger.info(f"Attempting to close position of {current_amount:.8f} BTC...")
-                        order = place_order('sell', current_amount, current_price)
+                        order = place_order(exchange, symbol, 'sell', current_amount, current_price)
                         if order:
                             exit_time = datetime.now()
                             stats.add_trade(entry_price, current_price, entry_time.isoformat(), exit_time.isoformat())
@@ -399,5 +409,13 @@ def main():
             logger.info("Waiting for 60 seconds before retrying...")
             time.sleep(60)
 
+    # After the main loop ends, perform cleanup
+    cleanup(exchange, stats)
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt caught in main. Exiting gracefully.")
+        # Note: cleanup is called inside main() when the loop exits
+    sys.exit(0)
