@@ -41,7 +41,7 @@ def load_trades_sqlite():
         logger.debug(f"SQL query executed. Retrieved {len(df)} rows.")
         df['entry_time'] = pd.to_datetime(df['entry_time'])
         df['exit_time'] = pd.to_datetime(df['exit_time'])
-        df['profit_usd'] = ((df['exit_price'] - df['entry_price']) / df['entry_price'] * df['entry_price']) / 1000
+        df['profit_usd'] = ((df['exit_price'] - df['entry_price']) / df['entry_price'] * df['btc_amount'] * df['exit_price'])
         logger.debug("Data processing completed.")
         return df
     except sqlite3.Error as e:
@@ -105,6 +105,8 @@ def save_stats_html(df, trend_chart):
         winning_trades = len(df[df['profit_usd'] > 0])
         losing_trades = len(df[df['profit_usd'] <= 0])
         win_rate = winning_trades / total_trades if total_trades > 0 else 0
+        total_btc_traded = df['btc_amount'].sum()
+        total_usdt_traded = df['usdt_amount'].sum()
 
         html_content = f"""
         <html>
@@ -133,6 +135,8 @@ def save_stats_html(df, trend_chart):
                     <p>Losing Trades: {losing_trades}</p>
                     <p>Win Rate: {win_rate:.2%}</p>
                     <p>Total Profit/Loss: ${total_profit:.2f}</p>
+                    <p>Total BTC Traded: {total_btc_traded:.8f} BTC</p>
+                    <p>Total USDT Traded: ${total_usdt_traded:.2f}</p>
                     <p>Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
                 </div>
                 
@@ -146,9 +150,11 @@ def save_stats_html(df, trend_chart):
                         <th>Exit Time</th>
                         <th>Entry Price</th>
                         <th>Exit Price</th>
+                        <th>BTC Amount</th>
+                        <th>USDT Amount</th>
                         <th>Profit/Loss (USD)</th>
                     </tr>
-                    {''.join(f"<tr><td>{row['entry_time']}</td><td>{row['exit_time']}</td><td>${row['entry_price']:.2f}</td><td>${row['exit_price']:.2f}</td><td>${row['profit_usd']:.2f}</td></tr>" for _, row in df.iterrows())}
+                    {''.join(f"<tr><td>{row['entry_time']}</td><td>{row['exit_time']}</td><td>${row['entry_price']:.2f}</td><td>${row['exit_price']:.2f}</td><td>{row['btc_amount']:.8f}</td><td>${row['usdt_amount']:.2f}</td><td>${row['profit_usd']:.2f}</td></tr>" for _, row in df.iterrows())}
                 </table>
             </div>
         </body>
