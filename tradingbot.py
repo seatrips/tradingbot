@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
@@ -40,7 +40,7 @@ class TradingStats:
             conn = sqlite3.connect('trades.db')
             c = conn.cursor()
             c.execute('''CREATE TABLE IF NOT EXISTS trades
-                         (entry_price real, exit_price real, entry_time text, exit_time text, profit real)''')
+                         (entry_price real, exit_price real, entry_time text, exit_time text, profit real, btc_amount real, usdt_amount real)''')
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Database initialization error: {e}")
@@ -48,14 +48,16 @@ class TradingStats:
             if conn:
                 conn.close()
 
-    def add_trade(self, entry_price, exit_price, entry_time, exit_time):
+    def add_trade(self, entry_price, exit_price, entry_time, exit_time, btc_amount, usdt_amount):
         profit = (exit_price - entry_price) / entry_price
         trade = {
             'entry_price': entry_price,
             'exit_price': exit_price,
             'entry_time': entry_time,
             'exit_time': exit_time,
-            'profit': profit
+            'profit': profit,
+            'btc_amount': btc_amount,
+            'usdt_amount': usdt_amount
         }
         self.trades.append(trade)
         self.total_trades += 1
@@ -75,9 +77,9 @@ class TradingStats:
         try:
             conn = sqlite3.connect('trades.db')
             c = conn.cursor()
-            c.execute("INSERT INTO trades VALUES (?,?,?,?,?)", 
+            c.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?)", 
                       (trade['entry_price'], trade['exit_price'], trade['entry_time'], 
-                       trade['exit_time'], trade['profit']))
+                       trade['exit_time'], trade['profit'], trade['btc_amount'], trade['usdt_amount']))
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Database error: {e}")
@@ -149,7 +151,7 @@ def load_trades_sqlite():
         conn = sqlite3.connect('trades.db')
         c = conn.cursor()
         c.execute("SELECT * FROM trades")
-        trades = [dict(zip(['entry_price', 'exit_price', 'entry_time', 'exit_time', 'profit'], row)) for row in c.fetchall()]
+        trades = [dict(zip(['entry_price', 'exit_price', 'entry_time', 'exit_time', 'profit', 'btc_amount', 'usdt_amount'], row)) for row in c.fetchall()]
         return trades
     except sqlite3.Error as e:
         logger.error(f"Database error: {e}")
@@ -298,8 +300,9 @@ def main():
 
     symbol = 'BTC/USDT'
     timeframe = '1m'
-    take_profit = 0.0018  # 0.18% take profit
-    stop_loss = 0.0006  # 0.06% stop loss
+    initial_take_profit = 0.0018  # 0.18% initial take profit
+    initial_stop_loss = 0.0006  # 0.06% initial stop loss
+    trailing_stop = 0.0003  # 0.03% trailing stop
 
     stats = TradingStats()
     last_log_time = datetime.now()
@@ -307,8 +310,9 @@ def main():
     logger.info("Trading bot is running...")
     logger.info(f"Trading {symbol} on {timeframe} timeframe")
     logger.info(f"Using EMA24/SMA67 crossover, RSI oversold, and horizontal support bounce strategy")
-    logger.info(f"Take profit set at {take_profit*100}%")
-    logger.info(f"Stop loss set at {stop_loss*100}%")
+    logger.info(f"Initial take profit set at {initial_take_profit*100}%")
+    logger.info(f"Initial stop loss set at {initial_stop_loss*100}%")
+    logger.info(f"Trailing stop set at {trailing_stop*100}%")
     logger.info(f"Buy amount: 90% of available USDT balance")
 
     while running:
@@ -320,12 +324,16 @@ def main():
                 entry_price = trade_data['entry_price']
                 entry_time = datetime.fromisoformat(trade_data['entry_time'])
                 current_amount = trade_data['current_amount']
-                logger.info(f"Loaded trade data. Position: {position}, Entry price: {entry_price}, Amount: {current_amount}")
+                highest_price = trade_data.get('highest_price', entry_price)
+                trailing_active = trade_data.get('trailing_active', False)
+                logger.info(f"Loaded trade data. Position: {position}, Entry price: {entry_price}, Amount: {current_amount}, Highest price: {highest_price}, Trailing active: {trailing_active}")
             else:
                 position = None
                 entry_price = 0
                 entry_time = None
                 current_amount = 0
+                highest_price = 0
+                trailing_active = False
 
             # Fetch latest data
             df = fetch_ohlcv(exchange, symbol, timeframe, limit=100)
@@ -335,40 +343,76 @@ def main():
             current_price = df['close'].iloc[-1]
             signal = check_trading_conditions(df, support_levels)
 
-            # Log only when there's a signal or an active position
-            if signal or position:
-                logger.info(f"Current price: {current_price}, Signal: {signal}")
-            elif (datetime.now() - last_log_time).total_seconds() >= 3600:  # Log at least every hour
-                logger.info(f"Current price: {current_price}, No signal, No active position")
-                last_log_time = datetime.now()
+            # Log current market state and trading signals
+            logger.info(f"Current state: Price={current_price}, Signal={signal}, Position={position}, Trailing active={trailing_active}")
 
             if position is None and (signal == 'buy_ema_cross' or signal == 'buy_oversold_bounce'):
+                logger.info(f"Potential buy signal detected: {signal}")
+                
                 buy_amount = calculate_buy_amount(exchange, current_price)
                 if buy_amount is not None and buy_amount > 0:
-                    logger.info(f"Buy signal detected ({signal}). Attempting to place buy order for {buy_amount:.8f} BTC...")
+                    logger.info(f"Buy signal confirmed. Attempting to place buy order for {buy_amount:.8f} BTC...")
+                    
                     order = place_order(exchange, symbol, 'buy', buy_amount, current_price)
                     if order:
                         position = 'long'
                         entry_price = current_price
                         entry_time = datetime.now()
                         current_amount = buy_amount
-                        logger.info(f"Entered long position at {entry_price} for {current_amount:.8f} BTC")
+                        usdt_amount = current_amount * current_price
+                        highest_price = current_price
+                        trailing_active = False
+                        logger.info(f"Entered long position at {entry_price} for {current_amount:.8f} BTC ({usdt_amount:.2f} USDT)")
                         # Save trade data
                         save_trade_data({
                             'position': position,
                             'entry_price': entry_price,
                             'entry_time': entry_time.isoformat(),
-                            'current_amount': current_amount
+                            'current_amount': current_amount,
+                            'usdt_amount': usdt_amount,
+                            'highest_price': highest_price,
+                            'trailing_active': trailing_active
                         })
+                    else:
+                        logger.error("Failed to place buy order. Continuing to next iteration.")
                 else:
                     logger.warning("Unable to calculate buy amount or insufficient funds.")
 
             elif position == 'long':
-                if (signal == 'sell' or 
-                    current_price >= entry_price * (1 + take_profit) or 
-                    current_price <= entry_price * (1 - stop_loss)):
+                # Update highest price if current price is higher
+                if current_price > highest_price:
+                    highest_price = current_price
+                    logger.info(f"New highest price reached: {highest_price}")
+                    save_trade_data({
+                        'position': position,
+                        'entry_price': entry_price,
+                        'entry_time': entry_time.isoformat(),
+                        'current_amount': current_amount,
+                        'usdt_amount': current_amount * current_price,
+                        'highest_price': highest_price,
+                        'trailing_active': trailing_active
+                    })
+
+                # Check if take profit is reached and activate trailing stop
+                if current_price >= entry_price * (1 + initial_take_profit) and not trailing_active:
+                    trailing_active = True
+                    logger.info(f"Take profit reached. Activating trailing stop at {trailing_stop*100}%")
+                    save_trade_data({
+                        'position': position,
+                        'entry_price': entry_price,
+                        'entry_time': entry_time.isoformat(),
+                        'current_amount': current_amount,
+                        'usdt_amount': current_amount * current_price,
+                        'highest_price': highest_price,
+                        'trailing_active': trailing_active
+                    })
+
+                # Check conditions for closing the position
+                if ((signal == 'sell' and not trailing_active) or
+                    (not trailing_active and current_price <= entry_price * (1 - initial_stop_loss)) or
+                    (trailing_active and current_price <= highest_price * (1 - trailing_stop))):
                     
-                    reason = "Sell signal" if signal == 'sell' else "Take profit" if current_price >= entry_price * (1 + take_profit) else "Stop loss"
+                    reason = "Sell signal" if signal == 'sell' and not trailing_active else "Stop loss" if not trailing_active else "Trailing stop"
                     logger.info(f"{reason} triggered. Checking actual BTC balance...")
                     
                     actual_btc_balance = get_btc_balance(exchange)
@@ -384,15 +428,21 @@ def main():
                         order = place_order(exchange, symbol, 'sell', current_amount, current_price)
                         if order:
                             exit_time = datetime.now()
-                            stats.add_trade(entry_price, current_price, entry_time.isoformat(), exit_time.isoformat())
+                            usdt_amount = current_amount * current_price
+                            stats.add_trade(entry_price, current_price, entry_time.isoformat(), exit_time.isoformat(), current_amount, usdt_amount)
                             position = None
                             logger.info(f"Closed long position at {current_price} due to {reason.lower()}")
                             # Clear trade data
                             save_trade_data(None)
+                        else:
+                            logger.error("Failed to place sell order. Will retry in next iteration.")
                     else:
                         logger.warning("No BTC balance to sell. Resetting position.")
                         position = None
                         save_trade_data(None)
+
+            # Log end of iteration
+            logger.info("Completed iteration. Waiting for next cycle.")
 
             time.sleep(60)  # Wait for 1 minute before next iteration
 
