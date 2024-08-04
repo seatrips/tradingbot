@@ -12,6 +12,8 @@ import sqlite3
 import os
 import signal
 import sys
+from scipy.stats import linregress
+import pytz
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -115,6 +117,14 @@ def detect_horizontal_support(df, lookback=100, threshold=0.02):
             support_levels.append(df['low'].iloc[i])
     return support_levels
 
+def detect_horizontal_resistance(df, lookback=100, threshold=0.02):
+    highs = df['high'].rolling(window=lookback).max()
+    resistance_levels = []
+    for i in range(len(df) - lookback):
+        if abs(df['high'].iloc[i] - highs.iloc[i]) / df['high'].iloc[i] < threshold:
+            resistance_levels.append(df['high'].iloc[i])
+    return resistance_levels
+
 def is_bounce_from_support(current_price, support_levels, threshold=0.01):
     for level in support_levels:
         if abs(current_price - level) / level < threshold:
@@ -191,44 +201,24 @@ def initialize_exchange():
             retry = input("Connection failed. Do you want to try again? (y/n): ")
             if retry.lower() != 'y':
                 logger.info("Exiting program.")
-                exit()
+                sys.exit(0)
 
-def get_usdt_balance(exchange):
+def get_balance(exchange, asset):
     try:
         balance = exchange.fetch_balance()
-        usdt_balance = balance['USDT']['free']
-        logger.info(f"Available USDT balance: {usdt_balance}")
-        return usdt_balance
+        return balance[asset]['free']
     except Exception as e:
-        logger.error(f"Error fetching USDT balance: {e}")
+        logger.error(f"Error fetching {asset} balance: {e}")
         return None
 
-def get_btc_balance(exchange):
-    try:
-        balance = exchange.fetch_balance()
-        btc_balance = balance['BTC']['free']
-        logger.info(f"Available BTC balance: {btc_balance}")
-        return btc_balance
-    except Exception as e:
-        logger.error(f"Error fetching BTC balance: {e}")
-        return None
-
-def calculate_buy_amount(exchange, current_price):
-    usdt_balance = get_usdt_balance(exchange)
-    if usdt_balance is None:
-        return None
-
-    buy_amount_usdt = usdt_balance * 0.9  # 90% of USDT balance
-    buy_amount_btc = buy_amount_usdt / current_price
-
-    logger.info(f"Calculated buy amount: {buy_amount_btc:.8f} BTC (90% of {usdt_balance:.2f} USDT)")
-    return buy_amount_btc
-
-def fetch_ohlcv(exchange, symbol, timeframe, limit):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
+def fetch_multi_timeframe_data(exchange, symbol, timeframes):
+    data = {}
+    for tf in timeframes:
+        ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=100)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        data[tf] = df
+    return data
 
 def calculate_indicators(df):
     df['ema24'] = df['close'].ewm(span=24, adjust=False).mean()
@@ -236,21 +226,108 @@ def calculate_indicators(df):
     df['rsi'] = calculate_rsi(df)
     return df
 
-def check_trading_conditions(df, support_levels):
-    current_price = df['close'].iloc[-1]
-    rsi = df['rsi'].iloc[-1]
-    ema_cross = df['ema24'].iloc[-1] > df['sma67'].iloc[-1] and df['ema24'].iloc[-2] <= df['sma67'].iloc[-2]
-    oversold = rsi < 20
-    bounce = is_bounce_from_support(current_price, support_levels)
+def calculate_atr(df, period=14):
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
     
-    if ema_cross:
-        return 'buy_ema_cross'
-    elif oversold and bounce:
-        return 'buy_oversold_bounce'
-    elif df['ema24'].iloc[-1] < df['sma67'].iloc[-1] and df['ema24'].iloc[-2] >= df['sma67'].iloc[-2]:
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    
+    return true_range.rolling(window=period).mean()
+
+def calculate_dynamic_sl_tp(df, entry_price, atr_multiple=2, rr_ratio=3):
+    atr = calculate_atr(df).iloc[-1]
+    
+    sl_distance = atr * atr_multiple
+    
+    support_levels = detect_horizontal_support(df)
+    resistance_levels = detect_horizontal_resistance(df)
+    
+    nearest_support = min((level for level in support_levels if level < entry_price), default=entry_price - sl_distance)
+    nearest_resistance = min((level for level in resistance_levels if level > entry_price), default=entry_price + sl_distance)
+    
+    adjusted_sl = max(entry_price - sl_distance, nearest_support)
+    if entry_price - adjusted_sl > 1.5 * sl_distance:
+        adjusted_sl = entry_price - 1.5 * sl_distance
+    
+    sl_amount = entry_price - adjusted_sl
+    tp_amount = sl_amount * rr_ratio
+    take_profit = entry_price + tp_amount
+    
+    if abs(take_profit - nearest_resistance) < atr:
+        take_profit = nearest_resistance - atr
+    
+    return adjusted_sl, take_profit
+
+def calculate_dynamic_position_size(df, available_funds, min_percentage=0.5, max_percentage=0.9):
+    trend_strength = calculate_trend_strength(df)
+    
+    atr = calculate_atr(df).iloc[-1]
+    volatility_factor = 1 - (atr / df['close'].iloc[-1])
+    
+    volume_sma = df['volume'].rolling(window=20).mean().iloc[-1]
+    volume_factor = min(df['volume'].iloc[-1] / volume_sma, 2)
+    
+    rsi = calculate_rsi(df).iloc[-1]
+    rsi_factor = 1 - abs(50 - rsi) / 50
+    
+    current_price = df['close'].iloc[-1]
+    support_levels = detect_horizontal_support(df)
+    resistance_levels = detect_horizontal_resistance(df)
+    nearest_support = max([level for level in support_levels if level < current_price], default=current_price)
+    nearest_resistance = min([level for level in resistance_levels if level > current_price], default=current_price)
+    
+    support_distance = (current_price - nearest_support) / current_price
+    resistance_distance = (nearest_resistance - current_price) / current_price
+    sr_factor = min(support_distance, resistance_distance)
+
+    combined_factor = (
+        abs(trend_strength) * 0.3 +
+        volatility_factor * 0.2 +
+        volume_factor * 0.2 +
+        rsi_factor * 0.15 +
+        sr_factor * 0.15
+    )
+
+    position_percentage = min_percentage + (max_percentage - min_percentage) * combined_factor
+
+    return available_funds * position_percentage
+
+def calculate_trend_strength(df, period=14):
+    close = df['close'].values
+    x = np.arange(len(close))
+    slope, _, r_value, _, _ = linregress(x[-period:], close[-period:])
+    return abs(r_value) * (1 if slope > 0 else -1)
+
+def check_multi_timeframe_conditions(data):
+    short_tf = data['5m']
+    medium_tf = data['1h']
+    long_tf = data['4h']
+    
+    # Short timeframe conditions
+    short_ema_cross = short_tf['ema24'].iloc[-1] > short_tf['sma67'].iloc[-1] and short_tf['ema24'].iloc[-2] <= short_tf['sma67'].iloc[-2]
+    short_oversold = short_tf['rsi'].iloc[-1] < 30
+    
+    # Medium timeframe trend
+    medium_uptrend = medium_tf['close'].iloc[-1] > medium_tf['sma67'].iloc[-1]
+    
+    # Long timeframe trend
+    long_uptrend = long_tf['close'].iloc[-1] > long_tf['sma67'].iloc[-1]
+    
+    if short_ema_cross and short_oversold and medium_uptrend and long_uptrend:
+        return 'buy'
+    elif short_tf['ema24'].iloc[-1] < short_tf['sma67'].iloc[-1] and short_tf['ema24'].iloc[-2] >= short_tf['sma67'].iloc[-2]:
         return 'sell'
     else:
         return None
+
+def update_trailing_take_profit(current_price, highest_price, take_profit, trailing_percentage):
+    if current_price > highest_price:
+        new_take_profit = current_price * (1 - trailing_percentage)
+        if new_take_profit > take_profit:
+            return new_take_profit, current_price
+    return take_profit, highest_price
 
 def place_order(exchange, symbol, side, amount, price):
     try:
@@ -266,7 +343,7 @@ running = True
 
 def signal_handler(sig, frame):
     global running
-    print('You pressed Ctrl+C!')
+    print('Ctrl+C pressed. Initiating graceful shutdown...')
     running = False
 
 signal.signal(signal.SIGINT, signal_handler)
@@ -274,7 +351,6 @@ signal.signal(signal.SIGINT, signal_handler)
 def cleanup(exchange, stats):
     logger.info("Performing cleanup before exit...")
     
-    # Close any open positions
     trade_data = load_trade_data()
     if trade_data and trade_data['position'] == 'long':
         current_amount = trade_data['current_amount']
@@ -282,190 +358,196 @@ def cleanup(exchange, stats):
         logger.info(f"Closing open position: selling {current_amount:.8f} BTC at {current_price}")
         place_order(exchange, 'BTC/USDT', 'sell', current_amount, current_price)
     
-    # Save final statistics
     final_stats = stats.get_stats()
     logger.info("Final trading statistics:")
     for key, value in final_stats.items():
         logger.info(f"{key}: {value}")
     
-    # You might want to save these stats to a file or database here
-    
     logger.info("Cleanup complete. Exiting.")
+
+def is_trading_allowed():
+    amsterdam_tz = pytz.timezone('Europe/Amsterdam')
+    current_time = datetime.now(amsterdam_tz)
+    pause_start = current_time.replace(hour=2, minute=0, second=0, microsecond=0)
+    pause_end = current_time.replace(hour=4, minute=0, second=0, microsecond=0)
+    
+    return not (pause_start <= current_time < pause_end)
 
 def main():
     global running
     
-    # Initialize the Phemex exchange
     exchange = initialize_exchange()
-
     symbol = 'BTC/USDT'
-    timeframe = '1m'
-    initial_take_profit = 0.0018  # 0.18% initial take profit
-    initial_stop_loss = 0.0006  # 0.06% initial stop loss
-    trailing_stop = 0.0003  # 0.03% trailing stop
+    timeframes = ['5m', '1h', '4h']
+    trailing_percentage = 0.01  # 1% trailing take profit
 
     stats = TradingStats()
     last_log_time = datetime.now()
 
     logger.info("Trading bot is running...")
-    logger.info(f"Trading {symbol} on {timeframe} timeframe")
-    logger.info(f"Using EMA24/SMA67 crossover, RSI oversold, and horizontal support bounce strategy")
-    logger.info(f"Initial take profit set at {initial_take_profit*100}%")
-    logger.info(f"Initial stop loss set at {initial_stop_loss*100}%")
-    logger.info(f"Trailing stop set at {trailing_stop*100}%")
-    logger.info(f"Buy amount: 90% of available USDT balance")
+    logger.info(f"Trading {symbol} on multiple timeframes: {', '.join(timeframes)}")
+    logger.info(f"Trailing Take Profit set at {trailing_percentage*100}%")
+    logger.info("Press Ctrl+C to stop the bot safely.")
+    logger.info("Trading will be paused between 02:00 AM and 04:00 AM UTC+2 Amsterdam time.")
 
-    while running:
-        try:
-            # Load trade data at the start of each iteration
-            trade_data = load_trade_data()
-            if trade_data:
-                position = trade_data['position']
-                entry_price = trade_data['entry_price']
-                entry_time = datetime.fromisoformat(trade_data['entry_time'])
-                current_amount = trade_data['current_amount']
-                highest_price = trade_data.get('highest_price', entry_price)
-                trailing_active = trade_data.get('trailing_active', False)
-                logger.info(f"Loaded trade data. Position: {position}, Entry price: {entry_price}, Amount: {current_amount}, Highest price: {highest_price}, Trailing active: {trailing_active}")
-            else:
-                position = None
-                entry_price = 0
-                entry_time = None
-                current_amount = 0
-                highest_price = 0
-                trailing_active = False
+    try:
+        while running:
+            try:
+                if not is_trading_allowed():
+                    logger.info("Trading is currently paused due to time restrictions. Waiting...")
+                    time.sleep(60)
+                    continue
 
-            # Fetch latest data
-            df = fetch_ohlcv(exchange, symbol, timeframe, limit=100)
-            df = calculate_indicators(df)
-            support_levels = detect_horizontal_support(df)
+                # Load trade data at the start of each iteration
+                trade_data = load_trade_data()
+                if trade_data:
+                    position = trade_data['position']
+                    entry_price = trade_data['entry_price']
+                    entry_time = datetime.fromisoformat(trade_data['entry_time'])
+                    current_amount = trade_data['current_amount']
+                    stop_loss = trade_data['stop_loss']
+                    take_profit = trade_data['take_profit']
+                    highest_price = trade_data.get('highest_price', entry_price)
+                    logger.info(f"Loaded trade data. Position: {position}, Entry price: {entry_price}, Amount: {current_amount}, SL: {stop_loss}, TP: {take_profit}, Highest: {highest_price}")
+                else:
+                    position = None
+                    entry_price = 0
+                    entry_time = None
+                    current_amount = 0
+                    stop_loss = 0
+                    take_profit = 0
+                    highest_price = 0
 
-            current_price = df['close'].iloc[-1]
-            signal = check_trading_conditions(df, support_levels)
+                # Fetch latest data for all timeframes
+                multi_tf_data = fetch_multi_timeframe_data(exchange, symbol, timeframes)
+                for tf, df in multi_tf_data.items():
+                    multi_tf_data[tf] = calculate_indicators(df)
 
-            # Log current market state and trading signals
-            logger.info(f"Current state: Price={current_price}, Signal={signal}, Position={position}, Trailing active={trailing_active}")
+                current_price = multi_tf_data['5m']['close'].iloc[-1]
+                signal = check_multi_timeframe_conditions(multi_tf_data)
+                trend_strength = calculate_trend_strength(multi_tf_data['1h'])
 
-            if position is None and (signal == 'buy_ema_cross' or signal == 'buy_oversold_bounce'):
-                logger.info(f"Potential buy signal detected: {signal}")
-                
-                buy_amount = calculate_buy_amount(exchange, current_price)
-                if buy_amount is not None and buy_amount > 0:
-                    logger.info(f"Buy signal confirmed. Attempting to place buy order for {buy_amount:.8f} BTC...")
+                # Log current market state and trading signals
+                logger.info(f"Current state: Price={current_price}, Signal={signal}, Position={position}, Trend Strength={trend_strength:.2f}")
+
+                if position is None and signal == 'buy' and trend_strength > 0:
+                    logger.info("Buy signal detected across multiple timeframes.")
+                    
+                    available_funds = get_balance(exchange, 'USDT')
+                    if available_funds is None or available_funds == 0:
+                        logger.warning("No funds available for trading.")
+                        continue
+
+                    entry_amount = calculate_dynamic_position_size(multi_tf_data['5m'], available_funds)
+                    buy_amount = entry_amount / current_price
+
+                    logger.info(f"Attempting to place buy order for {buy_amount:.8f} BTC...")
                     
                     order = place_order(exchange, symbol, 'buy', buy_amount, current_price)
                     if order:
+                        stop_loss, take_profit = calculate_dynamic_sl_tp(multi_tf_data['5m'], current_price)
                         position = 'long'
                         entry_price = current_price
                         entry_time = datetime.now()
                         current_amount = buy_amount
-                        usdt_amount = current_amount * current_price
                         highest_price = current_price
-                        trailing_active = False
-                        logger.info(f"Entered long position at {entry_price} for {current_amount:.8f} BTC ({usdt_amount:.2f} USDT)")
+                        logger.info(f"Entered long position at {entry_price} for {current_amount:.8f} BTC")
+                        logger.info(f"Stop Loss set at: {stop_loss}")
+                        logger.info(f"Initial Take Profit set at: {take_profit}")
                         # Save trade data
                         save_trade_data({
                             'position': position,
                             'entry_price': entry_price,
                             'entry_time': entry_time.isoformat(),
                             'current_amount': current_amount,
-                            'usdt_amount': usdt_amount,
-                            'highest_price': highest_price,
-                            'trailing_active': trailing_active
+                            'stop_loss': stop_loss,
+                            'take_profit': take_profit,
+                            'highest_price': highest_price
                         })
                     else:
                         logger.error("Failed to place buy order. Continuing to next iteration.")
-                else:
-                    logger.warning("Unable to calculate buy amount or insufficient funds.")
 
-            elif position == 'long':
-                # Update highest price if current price is higher
-                if current_price > highest_price:
-                    highest_price = current_price
-                    logger.info(f"New highest price reached: {highest_price}")
-                    save_trade_data({
-                        'position': position,
-                        'entry_price': entry_price,
-                        'entry_time': entry_time.isoformat(),
-                        'current_amount': current_amount,
-                        'usdt_amount': current_amount * current_price,
-                        'highest_price': highest_price,
-                        'trailing_active': trailing_active
-                    })
-
-                # Check if take profit is reached and activate trailing stop
-                if current_price >= entry_price * (1 + initial_take_profit) and not trailing_active:
-                    trailing_active = True
-                    logger.info(f"Take profit reached. Activating trailing stop at {trailing_stop*100}%")
-                    save_trade_data({
-                        'position': position,
-                        'entry_price': entry_price,
-                        'entry_time': entry_time.isoformat(),
-                        'current_amount': current_amount,
-                        'usdt_amount': current_amount * current_price,
-                        'highest_price': highest_price,
-                        'trailing_active': trailing_active
-                    })
-
-                # Check conditions for closing the position
-                if ((signal == 'sell' and not trailing_active) or
-                    (not trailing_active and current_price <= entry_price * (1 - initial_stop_loss)) or
-                    (trailing_active and current_price <= highest_price * (1 - trailing_stop))):
+                elif position == 'long':
+                    # Update trailing take profit
+                    take_profit, highest_price = update_trailing_take_profit(current_price, highest_price, take_profit, trailing_percentage)
                     
-                    reason = "Sell signal" if signal == 'sell' and not trailing_active else "Stop loss" if not trailing_active else "Trailing stop"
-                    logger.info(f"{reason} triggered. Checking actual BTC balance...")
-                    
-                    actual_btc_balance = get_btc_balance(exchange)
-                    if actual_btc_balance is None:
-                        logger.error("Unable to fetch BTC balance. Skipping sell order.")
-                        continue
-                    
-                    if actual_btc_balance < current_amount:
-                        logger.warning(f"Actual BTC balance ({actual_btc_balance}) is less than expected ({current_amount}). Adjusting sell amount.")
-                        current_amount = actual_btc_balance
-                    if current_amount > 0:
-                        logger.info(f"Attempting to close position of {current_amount:.8f} BTC...")
-                        order = place_order(exchange, symbol, 'sell', current_amount, current_price)
-                        if order:
-                            exit_time = datetime.now()
-                            usdt_amount = current_amount * current_price
-                            stats.add_trade(entry_price, current_price, entry_time.isoformat(), exit_time.isoformat(), current_amount, usdt_amount)
-                            position = None
-                            logger.info(f"Closed long position at {current_price} due to {reason.lower()}")
-                            # Clear trade data
-                            save_trade_data(None)
+                    # Check conditions for closing the position
+                    if (signal == 'sell' or
+                        current_price <= stop_loss or
+                        current_price >= take_profit or
+                        trend_strength < -0.5):
+                        
+                        reason = "Sell signal" if signal == 'sell' else "Stop loss" if current_price <= stop_loss else "Take profit" if current_price >= take_profit else "Trend reversal"
+                        logger.info(f"{reason} triggered. Checking actual BTC balance...")
+                        
+                        actual_btc_balance = get_balance(exchange, 'BTC')
+                        if actual_btc_balance is None:
+                            logger.error("Unable to fetch BTC balance. Skipping sell order.")
+                            continue
+                        
+                        if actual_btc_balance < current_amount:
+                            logger.warning(f"Actual BTC balance ({actual_btc_balance}) is less than expected ({current_amount}). Adjusting sell amount.")
+                            current_amount = actual_btc_balance
+                        if current_amount > 0:
+                            logger.info(f"Attempting to close position of {current_amount:.8f} BTC...")
+                            order = place_order(exchange, symbol, 'sell', current_amount, current_price)
+                            if order:
+                                exit_time = datetime.now()
+                                usdt_amount = current_amount * current_price
+                                stats.add_trade(entry_price, current_price, entry_time.isoformat(), exit_time.isoformat(), current_amount, usdt_amount)
+                                position = None
+                                logger.info(f"Closed long position at {current_price} due to {reason.lower()}")
+                                # Clear trade data
+                                save_trade_data(None)
+                            else:
+                                logger.error("Failed to place sell order. Will retry in next iteration.")
                         else:
-                            logger.error("Failed to place sell order. Will retry in next iteration.")
+                            logger.warning("No BTC balance to sell. Resetting position.")
+                            position = None
+                            save_trade_data(None)
                     else:
-                        logger.warning("No BTC balance to sell. Resetting position.")
-                        position = None
-                        save_trade_data(None)
+                        # Update trade data with new take profit and highest price
+                        save_trade_data({
+                            'position': position,
+                            'entry_price': entry_price,
+                            'entry_time': entry_time.isoformat(),
+                            'current_amount': current_amount,
+                            'stop_loss': stop_loss,
+                            'take_profit': take_profit,
+                            'highest_price': highest_price
+                        })
 
-            # Log end of iteration
-            logger.info("Completed iteration. Waiting for next cycle.")
+                # Log trading statistics periodically
+                if datetime.now() - last_log_time > timedelta(hours=1):
+                    logger.info("Hourly trading statistics:")
+                    for key, value in stats.get_stats().items():
+                        logger.info(f"{key}: {value}")
+                    last_log_time = datetime.now()
 
-            time.sleep(60)  # Wait for 1 minute before next iteration
+                # Log end of iteration
+                logger.info("Completed iteration. Waiting for next cycle.")
 
-        except ccxt.NetworkError as e:
-            logger.error(f"Network error: {e}")
-            logger.info("Waiting for 60 seconds before retrying...")
-            time.sleep(60)
-        except ccxt.ExchangeError as e:
-            logger.error(f"Exchange error: {e}")
-            logger.info("Waiting for 60 seconds before retrying...")
-            time.sleep(60)
-        except Exception as e:
-            logger.error(f"An unexpected error occurred: {e}")
-            logger.info("Waiting for 60 seconds before retrying...")
-            time.sleep(60)
+                time.sleep(60)  # Wait for 1 minute before next iteration
 
-    # After the main loop ends, perform cleanup
-    cleanup(exchange, stats)
+            except ccxt.NetworkError as e:
+                logger.error(f"Network error: {e}")
+                logger.info("Waiting for 60 seconds before retrying...")
+                time.sleep(60)
+            except ccxt.ExchangeError as e:
+                logger.error(f"Exchange error: {e}")
+                logger.info("Waiting for 60 seconds before retrying...")
+                time.sleep(60)
+            except Exception as e:
+                logger.error(f"An unexpected error occurred: {e}")
+                logger.info("Waiting for 60 seconds before retrying...")
+                time.sleep(60)
+
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt caught. Initiating graceful shutdown...")
+    finally:
+        logger.info("Exiting main loop. Performing cleanup...")
+        cleanup(exchange, stats)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("KeyboardInterrupt caught in main. Exiting gracefully.")
-        # Note: cleanup is called inside main() when the loop exits
+    main()
     sys.exit(0)
