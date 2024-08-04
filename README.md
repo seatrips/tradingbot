@@ -1,145 +1,127 @@
-# BTC/USDT Trading Bot
+# Cryptocurrency Trading Bot
 
-## Overview
-
-This Python-based trading bot is designed to automatically trade Bitcoin (BTC) against USDT on the Phemex cryptocurrency exchange. It uses a combination of technical indicators and market analysis to make trading decisions.
+## Description
+This is an advanced cryptocurrency trading bot designed to automate trading on the Phemex exchange, focusing on the BTC/USDT pair. The bot uses multi-timeframe analysis, technical indicators, support/resistance levels, and dynamic position sizing to make trading decisions. It also features a Trailing Take Profit mechanism for optimized profit capture.
 
 ## Features
-
-- Connects to the Phemex exchange using the CCXT library
-- Implements a trading strategy based on:
-  - EMA24/SMA67 crossover
-  - RSI oversold conditions
-  - Horizontal support level bounces
-- Manages trades with:
-  - Take profit at 0.18%
-  - Stop loss at 0.06%
-- Logs all activities and trades
-- Stores trade data in a SQLite database
-- Generates price charts with indicators
+- Automated trading on Phemex exchange
+- Multi-timeframe analysis (5m, 1h, 4h)
+- Technical analysis using EMA, SMA, and RSI indicators
+- Support and resistance level detection
+- Dynamic stop-loss and take-profit calculations
+- Trailing Take Profit mechanism
+- Trend strength analysis
+- Adaptive position sizing based on market conditions
+- Real-time logging and error handling
+- Persistent trade data storage using SQLite and JSON
+- Graceful shutdown and position management
+- Trading pause during specified hours (02:00 AM to 04:00 AM UTC+2 Amsterdam time)
 
 ## Requirements
-
 - Python 3.7+
 - ccxt
 - pandas
 - numpy
 - matplotlib
-- sqlite3
+- scipy
+- pytz
 
 ## Installation
 
-1. Clone this repository
-2. Install the required packages:
+### Windows
+1. Install Python 3.7+ from [python.org](https://www.python.org/downloads/windows/)
+2. Open Command Prompt and run:
    ```
-   pip install ccxt pandas numpy matplotlib
+   pip install ccxt pandas numpy matplotlib scipy pytz
    ```
-3. Set up your Phemex API key and secret
 
-## Configuration
+### Raspberry Pi (Raspbian)
+1. Open terminal and run:
+   ```
+   sudo apt-get update
+   sudo apt-get install python3-pip
+   pip3 install ccxt pandas numpy matplotlib scipy pytz
+   ```
 
-Before running the bot, you need to configure the following:
+### Ubuntu
+1. Open terminal and run:
+   ```
+   sudo apt-get update
+   sudo apt-get install python3-pip
+   pip3 install ccxt pandas numpy matplotlib scipy pytz
+   ```
 
-- Phemex API key and secret
-- Trading pair (default is BTC/USDT)
-- Timeframe (default is 1 minute)
-- Take profit and stop loss percentages
+### macOS
+1. Install Homebrew if not already installed:
+   ```
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+   ```
+2. Install Python and required packages:
+   ```
+   brew install python
+   pip3 install ccxt pandas numpy matplotlib scipy pytz
+   ```
 
 ## Usage
+1. Clone this repository:
+   ```
+   git clone https://github.com/seatrips/tradingbot.git
+   cd crypto-trading-bot
+   ```
+2. Run the bot using the following command:
+   ```
+   python tradingbot.py
+   ```
+   or
+   ```
+   python3 tradingbot.py
+   ```
+4. Enter your Phemex API key and secret when prompted.
 
-Run the bot using:
+## Configuration
+The bot uses several parameters that can be adjusted in the script:
+- `timeframes`: Currently set to ['5m', '1h', '4h']
+- `symbol`: Currently set to 'BTC/USDT'
+- `trailing_percentage`: Currently set to 0.01 (1% trailing take profit)
+- Various threshold values in the trading logic functions
 
-```
-python trading_bot.py
-```
+## Trading Strategy
 
-The bot will prompt you to enter your Phemex API key and secret when it starts.
+The bot implements a sophisticated trading strategy that combines multiple technical indicators and market analysis techniques:
 
-## How it Works
+1. Multi-timeframe Analysis (5m, 1h, 4h)
+2. EMA and SMA Crossovers
+3. RSI (Relative Strength Index) Analysis
+4. Support and Resistance Level Detection
+5. Trend Strength Calculation
+6. Dynamic Position Sizing
+7. Adaptive Stop-Loss and Take-Profit Levels
+8. Trailing Take Profit Mechanism
+9. Entry Conditions (EMA/SMA crossover or RSI oversold with support bounce, confirmed across multiple timeframes)
+10. Exit Conditions (EMA/SMA bearish crossover, stop-loss, take-profit, trend reversal)
+11. Continuous Market Analysis (every 1 minute)
+12. Risk Management (dynamic position sizing and stop-loss)
 
-1. **Initialization**: 
-   - Connects to the Phemex exchange
-   - Checks initial balances
+## Logging
+The bot logs all activities, including trades, errors, and periodic statistics. Logs are saved in a file named `trading_log_YYYYMMDD_HHMMSS.log`.
 
-2. **Main Loop**:
-   - Fetches latest market data
-   - Calculates technical indicators (EMA24, SMA67, RSI)
-   - Detects horizontal support levels
-   - Checks for trading signals
+## Data Storage
+- Trade data is stored in an SQLite database (`trades.db`) for persistence and analysis.
+- Current trade information is stored in a JSON file (`trade_data.json`) for quick access and recovery in case of bot restart.
 
-3. **Buy Signal**:
-   - Triggered by EMA24 crossing above SMA67 or
-   - RSI oversold condition with price bouncing from support
-   - Places a market buy order for 90% of available USDT balance
-
-4. **Sell Signal**:
-   - Triggered by EMA24 crossing below SMA67 or
-   - Take profit or stop loss conditions met
-   - Places a market sell order for the entire position
-
-5. **Logging and Data Storage**:
-   - All activities and trades are logged
-   - Trade data is stored in a SQLite database
-
-## Risk Management
-
-- The bot uses only 90% of available USDT for each trade
-- A stop loss is set at 0.06% below the entry price
-- A take profit is set at 0.18% above the entry price
-
-## Stats Generator
-
-The project includes a separate script for generating and updating trading statistics:
-
-### Features
-
-- Automatically updates trading statistics
-- Generates an HTML report with:
-  - Summary of trading performance
-  - Cumulative profit/loss trend chart
-  - Detailed trade history table
-- Refreshes data periodically
-
-### Usage
-
-Run the stats generator using:
-
-```
-python stats_generator.py
-```
-
-The script will:
-1. Connect to the SQLite database
-2. Load trade data
-3. Calculate performance metrics
-4. Generate a profit trend chart
-5. Create an HTML report (data.html)
-6. Automatically update when new trades are detected
-
-The HTML report includes:
-- Total number of trades
-- Number of winning and losing trades
-- Win rate
-- Total profit/loss
-- A chart showing cumulative profit/loss over time
-- A table with detailed trade history
-
-The report auto-refreshes every 60 seconds in the browser.
-
-## Limitations
-
-- The bot currently only supports trading on the Phemex exchange
-- It's designed to trade a single pair (BTC/USDT by default)
-- The strategy is not guaranteed to be profitable in all market conditions
+## Safety Features
+- Graceful shutdown on Ctrl+C
+- Error handling for network and exchange issues
+- Periodic balance checks and position verification
+- Trading pause during potentially volatile hours
+- Trailing Take Profit to lock in gains during strong trends
 
 ## Disclaimer
-
-This bot is for educational purposes only. Use it at your own risk. The authors are not responsible for any financial losses incurred from using this bot.
+This bot is for educational purposes only. Use it at your own risk. Cryptocurrency trading involves substantial risk of loss and is not suitable for all investors. Past performance does not guarantee future results.
 
 ## Contributing
-
-Contributions, issues, and feature requests are welcome. Feel free to check [issues page] if you want to contribute.
+Contributions, issues, and feature requests are welcome. Feel free to check [issues page](https://github.com/yourusername/crypto-trading-bot/issues) if you want to contribute.
 
 ## License
+[MIT](https://choosealicense.com/licenses/mit/)
 
-[MIT License](https://choosealicense.com/licenses/mit/)
