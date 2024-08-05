@@ -66,7 +66,7 @@ This is an advanced cryptocurrency trading bot designed to automate trading on t
 1. Clone this repository:
    ```
    git clone https://github.com/seatrips/tradingbot.git
-   cd crypto-trading-bot
+   cd tradingbot
    ```
 2. Run the bot using the following command:
    ```
