@@ -307,7 +307,7 @@ def check_multi_timeframe_conditions(data):
     
     # Short timeframe conditions
     short_ema_cross = short_tf['ema24'].iloc[-1] > short_tf['sma67'].iloc[-1] and short_tf['ema24'].iloc[-2] <= short_tf['sma67'].iloc[-2]
-    short_oversold = short_tf['rsi'].iloc[-1] < 30
+    rsi_bullish = short_tf['rsi'].iloc[-1] > 50 and short_tf['rsi'].iloc[-1] > short_tf['rsi'].iloc[-2]  # RSI above 50 and increasing
     
     # Medium timeframe trend
     medium_uptrend = medium_tf['close'].iloc[-1] > medium_tf['sma67'].iloc[-1]
@@ -315,7 +315,7 @@ def check_multi_timeframe_conditions(data):
     # Long timeframe trend
     long_uptrend = long_tf['close'].iloc[-1] > long_tf['sma67'].iloc[-1]
     
-    if short_ema_cross and short_oversold and medium_uptrend and long_uptrend:
+    if short_ema_cross and rsi_bullish and medium_uptrend and long_uptrend:
         return 'buy'
     elif short_tf['ema24'].iloc[-1] < short_tf['sma67'].iloc[-1] and short_tf['ema24'].iloc[-2] >= short_tf['sma67'].iloc[-2]:
         return 'sell'
