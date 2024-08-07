@@ -5,7 +5,7 @@ This is an advanced cryptocurrency trading bot designed to automate trading on t
 
 ## Features
 - Automated trading on Phemex exchange
-- Multi-timeframe analysis (5m, 1h, 4h)
+- Multi-timeframe analysis (configurable, default: 5m, 1h, 4h)
 - Technical analysis using EMA, SMA, and RSI indicators
 - Support and resistance level detection
 - Dynamic stop-loss and take-profit calculations
@@ -15,7 +15,7 @@ This is an advanced cryptocurrency trading bot designed to automate trading on t
 - Real-time logging and error handling
 - Persistent trade data storage using SQLite and JSON
 - Graceful shutdown and position management
-- Trading pause during specified hours (02:00 AM to 04:00 AM UTC+2 Amsterdam time)
+- Configurable trading pause during specified hours
 
 ## Requirements
 - Python 3.7+
@@ -65,10 +65,27 @@ This is an advanced cryptocurrency trading bot designed to automate trading on t
 ## Usage
 1. Clone this repository:
    ```
-   git clone https://github.com/seatrips/tradingbot.git
-   cd tradingbot
+   git clone https://github.com/yourusername/crypto-trading-bot.git
+   cd crypto-trading-bot
    ```
-2. Run the bot using the following command:
+2. Create a `config.json` file in the same directory as the script with the following structure:
+   ```json
+   {
+     "api_key": "your_phemex_api_key",
+     "secret_key": "your_phemex_secret_key",
+     "trading_pair": "BTC/USDT",
+     "base_currency": "BTC",
+     "quote_currency": "USDT",
+     "timeframes": ["5m", "1h", "4h"],
+     "trailing_percentage": 0.01,
+     "sleep_time": 60,
+     "error_sleep_time": 300,
+     "pause_start": "02:00",
+     "pause_end": "04:00",
+     "timezone": "Europe/Amsterdam"
+   }
+   ```
+3. Run the bot using the following command:
    ```
    python tradingbot.py
    ```
@@ -76,20 +93,27 @@ This is an advanced cryptocurrency trading bot designed to automate trading on t
    ```
    python3 tradingbot.py
    ```
-4. Enter your Phemex API key and secret when prompted.
 
 ## Configuration
-The bot uses several parameters that can be adjusted in the script:
-- `timeframes`: Currently set to ['5m', '1h', '4h']
-- `symbol`: Currently set to 'BTC/USDT'
-- `trailing_percentage`: Currently set to 0.01 (1% trailing take profit)
-- Various threshold values in the trading logic functions
+The bot uses a `config.json` file for configuration. You can adjust the following parameters:
+- `api_key`: Your Phemex API key
+- `secret_key`: Your Phemex secret key
+- `trading_pair`: The trading pair to use (e.g., "BTC/USDT")
+- `base_currency`: The base currency of the trading pair (e.g., "BTC")
+- `quote_currency`: The quote currency of the trading pair (e.g., "USDT")
+- `timeframes`: Array of timeframes to use for analysis (e.g., ["5m", "1h", "4h"])
+- `trailing_percentage`: The trailing take profit percentage (e.g., 0.01 for 1%)
+- `sleep_time`: Time to wait between iterations in seconds
+- `error_sleep_time`: Time to wait after an error occurs before retrying
+- `pause_start`: Time to start the trading pause (24-hour format)
+- `pause_end`: Time to end the trading pause (24-hour format)
+- `timezone`: The timezone for the trading pause times
 
 ## Trading Strategy
 
 The bot implements a sophisticated trading strategy that combines multiple technical indicators and market analysis techniques:
 
-1. Multi-timeframe Analysis (5m, 1h, 4h)
+1. Multi-timeframe Analysis
 2. EMA and SMA Crossovers
 3. RSI (Relative Strength Index) Analysis
 4. Support and Resistance Level Detection
@@ -97,9 +121,9 @@ The bot implements a sophisticated trading strategy that combines multiple techn
 6. Dynamic Position Sizing
 7. Adaptive Stop-Loss and Take-Profit Levels
 8. Trailing Take Profit Mechanism
-9. Entry Conditions (EMA/SMA crossover or RSI oversold with support bounce, confirmed across multiple timeframes)
-10. Exit Conditions (EMA/SMA bearish crossover, stop-loss, take-profit, trend reversal)
-11. Continuous Market Analysis (every 1 minute)
+9. Entry Conditions (EMA/SMA crossover, RSI, and trend strength)
+10. Exit Conditions (Signal change, stop-loss, take-profit, trend reversal)
+11. Continuous Market Analysis
 12. Risk Management (dynamic position sizing and stop-loss)
 
 ## Logging
@@ -113,7 +137,7 @@ The bot logs all activities, including trades, errors, and periodic statistics. 
 - Graceful shutdown on Ctrl+C
 - Error handling for network and exchange issues
 - Periodic balance checks and position verification
-- Trading pause during potentially volatile hours
+- Configurable trading pause during potentially volatile hours
 - Trailing Take Profit to lock in gains during strong trends
 
 ## Disclaimer
@@ -124,4 +148,3 @@ Contributions, issues, and feature requests are welcome. Feel free to check [iss
 
 ## License
 [MIT](https://choosealicense.com/licenses/mit/)
-
