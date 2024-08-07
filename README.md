@@ -93,7 +93,15 @@ This is an advanced cryptocurrency trading bot designed to automate trading on t
    ```
    python3 tradingbot.py
    ```
-
+4. Run the tradingstats generator using the following command:
+   ```
+   python generate_trading_stats.py
+   ```
+   or
+   ```
+   python3 generate_trading_stats.py
+   ```
+   
 ## Configuration
 The bot uses a `config.json` file for configuration. You can adjust the following parameters:
 - `api_key`: Your Phemex API key
