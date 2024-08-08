@@ -4,15 +4,11 @@ import numpy as np
 import time
 import logging
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-import base64
-from io import BytesIO
 import json
 import sqlite3
 import os
 import signal
 import sys
-from scipy.stats import linregress
 import pytz
 
 # Load configuration from JSON file
@@ -124,66 +120,58 @@ def calculate_rsi(df, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def detect_horizontal_support(df, lookback=100, threshold=0.02):
-    lows = df['low'].rolling(window=lookback).min()
-    support_levels = []
-    for i in range(len(df) - lookback):
-        if abs(df['low'].iloc[i] - lows.iloc[i]) / df['low'].iloc[i] < threshold:
-            support_levels.append(df['low'].iloc[i])
-    return support_levels
+def calculate_indicators(df):
+    df['ema24'] = df['close'].ewm(span=24, adjust=False).mean()
+    df['sma67'] = df['close'].rolling(window=67).mean()
+    df['rsi'] = calculate_rsi(df)
+    return df
 
-def detect_horizontal_resistance(df, lookback=100, threshold=0.02):
-    highs = df['high'].rolling(window=lookback).max()
-    resistance_levels = []
-    for i in range(len(df) - lookback):
-        if abs(df['high'].iloc[i] - highs.iloc[i]) / df['high'].iloc[i] < threshold:
-            resistance_levels.append(df['high'].iloc[i])
-    return resistance_levels
+def fetch_multi_timeframe_data(exchange, symbol, timeframes):
+    data = {}
+    for tf in timeframes:
+        ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=100)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        data[tf] = calculate_indicators(df)
+    return data
 
-def is_bounce_from_support(current_price, support_levels, threshold=0.01):
-    for level in support_levels:
-        if abs(current_price - level) / level < threshold:
-            return True
-    return False
+def check_multi_timeframe_conditions(data):
+    timeframes = list(data.keys())
+    timeframes.sort(key=lambda x: pd.Timedelta(x))  # Sort timeframes
+    shortest_tf, middle_tf, longest_tf = timeframes
 
-def generate_price_chart(df, support_levels):
-    plt.figure(figsize=(10, 5))
-    plt.plot(df['timestamp'], df['close'], label='Price')
-    plt.plot(df['timestamp'], df['ema24'], label='EMA24')
-    plt.plot(df['timestamp'], df['sma67'], label='SMA67')
+    conditions = {tf: {} for tf in timeframes}
     
-    for level in support_levels:
-        plt.axhline(y=level, color='r', linestyle='--', alpha=0.5)
+    for tf in timeframes:
+        df = data[tf]
+        conditions[tf]['ema_above_sma'] = df['ema24'].iloc[-1] > df['sma67'].iloc[-1]
+        conditions[tf]['ema_cross_up'] = df['ema24'].iloc[-1] > df['sma67'].iloc[-1] and df['ema24'].iloc[-2] <= df['sma67'].iloc[-2]
+        conditions[tf]['ema_cross_down'] = df['ema24'].iloc[-1] < df['sma67'].iloc[-1] and df['ema24'].iloc[-2] >= df['sma67'].iloc[-2]
+        conditions[tf]['rsi_above_50'] = df['rsi'].iloc[-1] > 50
+
+    # Buy signal
+    buy_condition = (
+        conditions[longest_tf]['ema_above_sma'] and
+        conditions[middle_tf]['ema_above_sma'] and
+        conditions[shortest_tf]['ema_cross_up'] and
+        all(conditions[tf]['rsi_above_50'] for tf in timeframes)
+    )
+
+    if buy_condition:
+        return 'buy'
     
-    plt.title('BTC/USDT Price Chart with Indicators')
-    plt.xlabel('Time')
-    plt.ylabel('Price (USDT)')
-    plt.legend()
-    plt.xticks(rotation=45)
-    plt.tight_layout()
+    # Sell signal
+    elif conditions[longest_tf]['ema_cross_down']:
+        return 'sell'
+    
+    return None
 
-    buffer = BytesIO()
-    plt.savefig(buffer, format='png')
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-    plt.close()
+def calculate_stop_loss(df):
+    return df['low'].rolling(window=100).min().iloc[-1]
 
-    return image_base64
-
-def load_trades_sqlite():
-    conn = None
-    try:
-        conn = sqlite3.connect('trades.db')
-        c = conn.cursor()
-        c.execute("SELECT * FROM trades")
-        trades = [dict(zip(['entry_price', 'exit_price', 'entry_time', 'exit_time', 'profit', 'btc_amount', 'usdt_amount'], row)) for row in c.fetchall()]
-        return trades
-    except sqlite3.Error as e:
-        logger.error(f"Database error: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
+def calculate_take_profit(entry_price, stop_loss):
+    sl_distance = entry_price - stop_loss
+    return entry_price + (3 * sl_distance)
 
 def save_trade_data(data):
     with open('trade_data.json', 'w') as f:
@@ -218,130 +206,6 @@ def get_balance(exchange, asset):
     except Exception as e:
         logger.error(f"Error fetching {asset} balance: {e}")
         return None
-
-def fetch_multi_timeframe_data(exchange, symbol, timeframes):
-    data = {}
-    for tf in timeframes:
-        ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=100)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        data[tf] = df
-    return data
-
-def calculate_indicators(df):
-    df['ema24'] = df['close'].ewm(span=24, adjust=False).mean()
-    df['sma67'] = df['close'].rolling(window=67).mean()
-    df['rsi'] = calculate_rsi(df)
-    return df
-
-def calculate_atr(df, period=14):
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    
-    return true_range.rolling(window=period).mean()
-
-def calculate_dynamic_sl_tp(df, entry_price, atr_multiple=2, rr_ratio=3):
-    atr = calculate_atr(df).iloc[-1]
-    
-    sl_distance = atr * atr_multiple
-    
-    support_levels = detect_horizontal_support(df)
-    resistance_levels = detect_horizontal_resistance(df)
-    
-    nearest_support = min((level for level in support_levels if level < entry_price), default=entry_price - sl_distance)
-    nearest_resistance = min((level for level in resistance_levels if level > entry_price), default=entry_price + sl_distance)
-    
-    adjusted_sl = max(entry_price - sl_distance, nearest_support)
-    if entry_price - adjusted_sl > 1.5 * sl_distance:
-        adjusted_sl = entry_price - 1.5 * sl_distance
-    
-    sl_amount = entry_price - adjusted_sl
-    tp_amount = sl_amount * rr_ratio
-    take_profit = entry_price + tp_amount
-    
-    if abs(take_profit - nearest_resistance) < atr:
-        take_profit = nearest_resistance - atr
-    
-    return adjusted_sl, take_profit
-
-def calculate_dynamic_position_size(df, available_funds, min_percentage=0.5, max_percentage=0.9):
-    trend_strength = calculate_trend_strength(df)
-    
-    atr = calculate_atr(df).iloc[-1]
-    volatility_factor = 1 - (atr / df['close'].iloc[-1])
-    
-    volume_sma = df['volume'].rolling(window=20).mean().iloc[-1]
-    volume_factor = min(df['volume'].iloc[-1] / volume_sma, 2)
-    
-    rsi = calculate_rsi(df).iloc[-1]
-    rsi_factor = 1 - abs(50 - rsi) / 50
-    
-    current_price = df['close'].iloc[-1]
-    support_levels = detect_horizontal_support(df)
-    resistance_levels = detect_horizontal_resistance(df)
-    nearest_support = max([level for level in support_levels if level < current_price], default=current_price)
-    nearest_resistance = min([level for level in resistance_levels if level > current_price], default=current_price)
-    
-    support_distance = (current_price - nearest_support) / current_price
-    resistance_distance = (nearest_resistance - current_price) / current_price
-    sr_factor = min(support_distance, resistance_distance)
-
-    combined_factor = (
-        abs(trend_strength) * 0.3 +
-        volatility_factor * 0.2 +
-        volume_factor * 0.2 +
-        rsi_factor * 0.15 +
-        sr_factor * 0.15
-    )
-
-    position_percentage = min_percentage + (max_percentage - min_percentage) * combined_factor
-
-    return available_funds * position_percentage
-
-def calculate_trend_strength(df, period=14):
-    close = df['close'].values
-    x = np.arange(len(close))
-    slope, _, r_value, _, _ = linregress(x[-period:], close[-period:])
-    return abs(r_value) * (1 if slope > 0 else -1)
-
-def check_multi_timeframe_conditions(data):
-    timeframes = list(data.keys())
-    if len(timeframes) < 2:
-        logger.error("At least two timeframes are required for analysis")
-        return None
-    
-    # Sort timeframes from shortest to longest
-    sorted_timeframes = sorted(timeframes, key=lambda x: pd.Timedelta(x))
-    short_tf = sorted_timeframes[0]
-    long_tf = sorted_timeframes[-1]
-    
-    short_tf_data = data[short_tf]
-    long_tf_data = data[long_tf]
-    
-    # Short timeframe conditions
-    short_ema_cross = short_tf_data['ema24'].iloc[-1] > short_tf_data['sma67'].iloc[-1] and short_tf_data['ema24'].iloc[-2] <= short_tf_data['sma67'].iloc[-2]
-    rsi_bullish = short_tf_data['rsi'].iloc[-1] > 50 and short_tf_data['rsi'].iloc[-1] > short_tf_data['rsi'].iloc[-2]  # RSI above 50 and increasing
-    
-    # Long timeframe trend
-    long_uptrend = long_tf_data['close'].iloc[-1] > long_tf_data['sma67'].iloc[-1]
-    
-    if short_ema_cross and rsi_bullish and long_uptrend:
-        return 'buy'
-    elif short_tf_data['ema24'].iloc[-1] < short_tf_data['sma67'].iloc[-1] and short_tf_data['ema24'].iloc[-2] >= short_tf_data['sma67'].iloc[-2]:
-        return 'sell'
-    else:
-        return None
-
-def update_trailing_take_profit(current_price, highest_price, take_profit, trailing_percentage):
-    if current_price > highest_price:
-        new_take_profit = current_price * (1 - trailing_percentage)
-        if new_take_profit > take_profit:
-            return new_take_profit, current_price
-    return take_profit, highest_price
 
 def place_order(exchange, symbol, side, amount, price):
     try:
@@ -397,14 +261,14 @@ def main():
     exchange = initialize_exchange()
     symbol = config['trading_pair']
     timeframes = config['timeframes']
-    trailing_percentage = config['trailing_percentage']
+    timeframes.sort(key=lambda x: pd.Timedelta(x))
+    shortest_tf, middle_tf, longest_tf = timeframes
 
     stats = TradingStats()
     last_log_time = datetime.now()
 
     logger.info("Trading bot is running...")
     logger.info(f"Trading {symbol} on multiple timeframes: {', '.join(timeframes)}")
-    logger.info(f"Trailing Take Profit set at {trailing_percentage*100}%")
     logger.info("Press Ctrl+C to stop the bot safely.")
     logger.info(f"Trading will be paused between {config['pause_start']} and {config['pause_end']} {config['timezone']} time.")
 
@@ -425,8 +289,7 @@ def main():
                     current_amount = trade_data['current_amount']
                     stop_loss = trade_data['stop_loss']
                     take_profit = trade_data['take_profit']
-                    highest_price = trade_data.get('highest_price', entry_price)
-                    logger.info(f"Loaded trade data. Position: {position}, Entry price: {entry_price}, Amount: {current_amount}, SL: {stop_loss}, TP: {take_profit}, Highest: {highest_price}")
+                    logger.info(f"Loaded trade data. Position: {position}, Entry price: {entry_price}, Amount: {current_amount}, SL: {stop_loss}, TP: {take_profit}")
                 else:
                     position = None
                     entry_price = 0
@@ -434,21 +297,16 @@ def main():
                     current_amount = 0
                     stop_loss = 0
                     take_profit = 0
-                    highest_price = 0
 
                 # Fetch latest data for all timeframes
                 multi_tf_data = fetch_multi_timeframe_data(exchange, symbol, timeframes)
-                for tf, df in multi_tf_data.items():
-                    multi_tf_data[tf] = calculate_indicators(df)
-
-                current_price = multi_tf_data[timeframes[0]]['close'].iloc[-1]
+                current_price = multi_tf_data[shortest_tf]['close'].iloc[-1]
                 signal = check_multi_timeframe_conditions(multi_tf_data)
-                trend_strength = calculate_trend_strength(multi_tf_data[timeframes[-1]])
 
                 # Log current market state and trading signals
-                logger.info(f"Current state: Price={current_price}, Signal={signal}, Position={position}, Trend Strength={trend_strength:.2f}")
+                logger.info(f"Current state: Price={current_price}, Signal={signal}, Position={position}")
 
-                if position is None and signal == 'buy' and trend_strength > 0:
+                if position is None and signal == 'buy':
                     logger.info("Buy signal detected across multiple timeframes.")
                     
                     available_funds = get_balance(exchange, config['quote_currency'])
@@ -456,22 +314,22 @@ def main():
                         logger.warning("No funds available for trading.")
                         continue
 
-                    entry_amount = calculate_dynamic_position_size(multi_tf_data[timeframes[0]], available_funds)
+                    entry_amount = available_funds * config['position_size']
                     buy_amount = entry_amount / current_price
 
                     logger.info(f"Attempting to place buy order for {buy_amount:.8f} {config['base_currency']}...")
                     
                     order = place_order(exchange, symbol, 'buy', buy_amount, current_price)
                     if order:
-                        stop_loss, take_profit = calculate_dynamic_sl_tp(multi_tf_data[timeframes[0]], current_price)
+                        stop_loss = calculate_stop_loss(multi_tf_data[shortest_tf])
+                        take_profit = calculate_take_profit(current_price, stop_loss)
                         position = 'long'
                         entry_price = current_price
                         entry_time = datetime.now()
                         current_amount = buy_amount
-                        highest_price = current_price
                         logger.info(f"Entered long position at {entry_price} for {current_amount:.8f} {config['base_currency']}")
                         logger.info(f"Stop Loss set at: {stop_loss}")
-                        logger.info(f"Initial Take Profit set at: {take_profit}")
+                        logger.info(f"Take Profit set at: {take_profit}")
                         # Save trade data
                         save_trade_data({
                             'position': position,
@@ -479,23 +337,15 @@ def main():
                             'entry_time': entry_time.isoformat(),
                             'current_amount': current_amount,
                             'stop_loss': stop_loss,
-                            'take_profit': take_profit,
-                            'highest_price': highest_price
+                            'take_profit': take_profit
                         })
                     else:
                         logger.error("Failed to place buy order. Continuing to next iteration.")
 
                 elif position == 'long':
-                    # Update trailing take profit
-                    take_profit, highest_price = update_trailing_take_profit(current_price, highest_price, take_profit, trailing_percentage)
-                    
                     # Check conditions for closing the position
-                    if (signal == 'sell' or
-                        current_price <= stop_loss or
-                        current_price >= take_profit or
-                        trend_strength < -0.5):
-                        
-                        reason = "Sell signal" if signal == 'sell' else "Stop loss" if current_price <= stop_loss else "Take profit" if current_price >= take_profit else "Trend reversal"
+                    if current_price <= stop_loss or current_price >= take_profit or signal == 'sell':
+                        reason = "Stop loss" if current_price <= stop_loss else "Take profit" if current_price >= take_profit else "Sell signal"
                         logger.info(f"{reason} triggered. Checking actual {config['base_currency']} balance...")
                         
                         actual_balance = get_balance(exchange, config['base_currency'])
@@ -524,15 +374,14 @@ def main():
                             position = None
                             save_trade_data(None)
                     else:
-                        # Update trade data with new take profit and highest price
+                        # Update trade data
                         save_trade_data({
                             'position': position,
                             'entry_price': entry_price,
                             'entry_time': entry_time.isoformat(),
                             'current_amount': current_amount,
                             'stop_loss': stop_loss,
-                            'take_profit': take_profit,
-                            'highest_price': highest_price
+                            'take_profit': take_profit
                         })
 
                 # Log trading statistics periodically
