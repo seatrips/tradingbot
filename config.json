@@ -1,12 +1,14 @@
 {
-  "api_key": "your_api_key_here",
-  "secret_key": "your_secret_key_here",
+  "api_key": "YOUR_API_KEY",
+  "secret_key": "YOUR_API_KEY_SECRET",
   "trading_pair": "BTC/USDT",
-  "timeframes": ["5m", "1h", "4h"],
-  "trailing_percentage": 0.01,
+  "base_currency": "BTC",
+  "quote_currency": "USDT",
+  "timeframes": ["1m", "5m", "15m"],
+  "position_size": 0.8,
+  "sleep_time": 60,
+  "error_sleep_time": 30,
   "pause_start": "02:00",
   "pause_end": "04:00",
-  "timezone": "Europe/Amsterdam",
-  "sleep_time": 60,
-  "error_sleep_time": 60
+  "timezone": "Europe/Amsterdam"
 }
