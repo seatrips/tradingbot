@@ -80,7 +80,7 @@ The bot implements a strategy based on EMA/SMA crossovers and RSI indicators:
 
 3. **Position Sizing**: Uses a specified percentage (default 80%) of available USDT for each trade.
 
-4. **Stop-Loss**: Set at the lowest low of the last 100 candles.
+4. **Stop-Loss**: Set at the lowest low of the last 200 candles.
 
 5. **Take-Profit**: Set at 3 times the distance to the stop-loss.
 
