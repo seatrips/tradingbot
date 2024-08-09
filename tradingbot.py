@@ -173,7 +173,7 @@ def check_multi_timeframe_conditions(data):
     return None
 
 def calculate_stop_loss(df):
-    min_low = df['low'].rolling(window=min(100, len(df))).min().iloc[-1]
+    min_low = df['low'].rolling(window=min(200, len(df))).min().iloc[-1]
     if pd.isna(min_low):
         return df['low'].iloc[-1] * 0.95  # Fallback to 5% below the last known low
     return min_low
