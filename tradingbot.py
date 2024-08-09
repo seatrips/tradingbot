@@ -121,6 +121,7 @@ def calculate_rsi(df, period=14):
     return 100 - (100 / (1 + rs))
 
 def calculate_indicators(df):
+    df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
     df['ema24'] = df['close'].ewm(span=24, adjust=False).mean()
     df['sma67'] = df['close'].rolling(window=67).mean()
     df['rsi'] = calculate_rsi(df)
@@ -148,6 +149,7 @@ def check_multi_timeframe_conditions(data):
         conditions[tf]['ema_cross_up'] = df['ema24'].iloc[-1] > df['sma67'].iloc[-1] and df['ema24'].iloc[-2] <= df['sma67'].iloc[-2]
         conditions[tf]['ema_cross_down'] = df['ema24'].iloc[-1] < df['sma67'].iloc[-1] and df['ema24'].iloc[-2] >= df['sma67'].iloc[-2]
         conditions[tf]['rsi_above_50'] = df['rsi'].iloc[-1] > 50
+        conditions[tf]['ema5_cross_down_ema24'] = df['ema5'].iloc[-1] < df['ema24'].iloc[-1] and df['ema5'].iloc[-2] >= df['ema24'].iloc[-2]
 
     # Buy signal
     buy_condition = (
@@ -157,21 +159,24 @@ def check_multi_timeframe_conditions(data):
         all(conditions[tf]['rsi_above_50'] for tf in timeframes)
     )
 
+    # Sell signal
+    sell_condition = (
+        conditions[longest_tf]['ema_cross_down'] or
+        conditions[longest_tf]['ema5_cross_down_ema24']  # Changed to longest_tf
+    )
+
     if buy_condition:
         return 'buy'
-    
-    # Sell signal
-    elif conditions[longest_tf]['ema_cross_down']:
+    elif sell_condition:
         return 'sell'
     
     return None
 
 def calculate_stop_loss(df):
-    return df['low'].rolling(window=100).min().iloc[-1]
-
-def calculate_take_profit(entry_price, stop_loss):
-    sl_distance = entry_price - stop_loss
-    return entry_price + (3 * sl_distance)
+    min_low = df['low'].rolling(window=min(100, len(df))).min().iloc[-1]
+    if pd.isna(min_low):
+        return df['low'].iloc[-1] * 0.95  # Fallback to 5% below the last known low
+    return min_low
 
 def save_trade_data(data):
     with open('trade_data.json', 'w') as f:
@@ -288,15 +293,13 @@ def main():
                     entry_time = datetime.fromisoformat(trade_data['entry_time'])
                     current_amount = trade_data['current_amount']
                     stop_loss = trade_data['stop_loss']
-                    take_profit = trade_data['take_profit']
-                    logger.info(f"Loaded trade data. Position: {position}, Entry price: {entry_price}, Amount: {current_amount}, SL: {stop_loss}, TP: {take_profit}")
+                    logger.info(f"Loaded trade data. Position: {position}, Entry price: {entry_price}, Amount: {current_amount}, SL: {stop_loss}")
                 else:
                     position = None
                     entry_price = 0
                     entry_time = None
                     current_amount = 0
                     stop_loss = 0
-                    take_profit = 0
 
                 # Fetch latest data for all timeframes
                 multi_tf_data = fetch_multi_timeframe_data(exchange, symbol, timeframes)
@@ -321,31 +324,35 @@ def main():
                     
                     order = place_order(exchange, symbol, 'buy', buy_amount, current_price)
                     if order:
+                        logger.info(f"Calculating SL. Entry price: {current_price}")
                         stop_loss = calculate_stop_loss(multi_tf_data[shortest_tf])
-                        take_profit = calculate_take_profit(current_price, stop_loss)
+                        logger.info(f"Calculated Stop Loss: {stop_loss}")
+                        
+                        if pd.isna(stop_loss):
+                            logger.warning(f"Invalid SL: {stop_loss}. Using fallback value.")
+                            stop_loss = current_price * 0.95  # 5% below current price
+                        
                         position = 'long'
                         entry_price = current_price
                         entry_time = datetime.now()
                         current_amount = buy_amount
                         logger.info(f"Entered long position at {entry_price} for {current_amount:.8f} {config['base_currency']}")
                         logger.info(f"Stop Loss set at: {stop_loss}")
-                        logger.info(f"Take Profit set at: {take_profit}")
                         # Save trade data
                         save_trade_data({
                             'position': position,
                             'entry_price': entry_price,
                             'entry_time': entry_time.isoformat(),
                             'current_amount': current_amount,
-                            'stop_loss': stop_loss,
-                            'take_profit': take_profit
+                            'stop_loss': stop_loss
                         })
                     else:
                         logger.error("Failed to place buy order. Continuing to next iteration.")
 
                 elif position == 'long':
                     # Check conditions for closing the position
-                    if current_price <= stop_loss or current_price >= take_profit or signal == 'sell':
-                        reason = "Stop loss" if current_price <= stop_loss else "Take profit" if current_price >= take_profit else "Sell signal"
+                    if current_price <= stop_loss or signal == 'sell':
+                        reason = "Stop loss" if current_price <= stop_loss else "EMA5 crossed down EMA24 on longest timeframe"
                         logger.info(f"{reason} triggered. Checking actual {config['base_currency']} balance...")
                         
                         actual_balance = get_balance(exchange, config['base_currency'])
@@ -356,19 +363,34 @@ def main():
                         if actual_balance < current_amount:
                             logger.warning(f"Actual {config['base_currency']} balance ({actual_balance}) is less than expected ({current_amount}). Adjusting sell amount.")
                             current_amount = actual_balance
+
                         if current_amount > 0:
-                            logger.info(f"Attempting to close position of {current_amount:.8f} {config['base_currency']}...")
-                            order = place_order(exchange, symbol, 'sell', current_amount, current_price)
-                            if order:
-                                exit_time = datetime.now()
-                                quote_amount = current_amount * current_price
-                                stats.add_trade(entry_price, current_price, entry_time.isoformat(), exit_time.isoformat(), current_amount, quote_amount)
+                            # Calculate the minimum order size
+                            market = exchange.market(symbol)
+                            min_amount = market['limits']['amount']['min']
+                            
+                            if current_amount < min_amount:
+                                logger.warning(f"Current amount ({current_amount}) is less than minimum order size ({min_amount}). Cannot place sell order.")
                                 position = None
-                                logger.info(f"Closed long position at {current_price} due to {reason.lower()}")
-                                # Clear trade data
                                 save_trade_data(None)
-                            else:
-                                logger.error("Failed to place sell order. Will retry in next iteration.")
+                                continue
+
+                            logger.info(f"Attempting to close position of {current_amount:.8f} {config['base_currency']}...")
+                            try:
+                                order = place_order(exchange, symbol, 'sell', current_amount, current_price)
+                                if order:
+                                    exit_time = datetime.now()
+                                    quote_amount = current_amount * current_price
+                                    stats.add_trade(entry_price, current_price, entry_time.isoformat(), exit_time.isoformat(), current_amount, quote_amount)
+                                    position = None
+                                    logger.info(f"Closed long position at {current_price} due to {reason.lower()}")
+                                    # Clear trade data
+                                    save_trade_data(None)
+                                else:
+                                    logger.error("Failed to place sell order. Will retry in next iteration.")
+                            except Exception as e:
+                                logger.error(f"Error placing sell order: {e}")
+                                logger.info("Will retry in next iteration.")
                         else:
                             logger.warning(f"No {config['base_currency']} balance to sell. Resetting position.")
                             position = None
@@ -380,8 +402,7 @@ def main():
                             'entry_price': entry_price,
                             'entry_time': entry_time.isoformat(),
                             'current_amount': current_amount,
-                            'stop_loss': stop_loss,
-                            'take_profit': take_profit
+                            'stop_loss': stop_loss
                         })
 
                 # Log trading statistics periodically
