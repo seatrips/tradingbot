@@ -5,7 +5,7 @@ This is an advanced cryptocurrency trading bot designed to automate trading on t
 
 ## Features
 - Automated trading on Phemex exchange
-- Multi-timeframe analysis (configurable, default: 5m, 15m, 1h)
+- Multi-timeframe analysis (configurable, default: 1m, 5m, 15m)
 - Technical analysis using EMA, SMA, and RSI indicators
 - Dynamic position sizing based on available USDT
 - Stop-loss mechanism
