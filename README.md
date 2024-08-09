@@ -74,10 +74,10 @@ The bot implements a strategy based on EMA/SMA crossovers and RSI indicators:
    - RSI > 50 on all timeframes
 2. **Sell Signal**:
    - EMA24 crosses below SMA67 on longest timeframe, or
-   - EMA5 crosses below EMA24 on longest timeframe (new take-profit condition), or
+   - EMA5 crosses below EMA24 on longest timeframe, or
    - Stop-loss hit
 3. **Position Sizing**: Uses a specified percentage (default 80%) of available USDT for each trade.
-4. **Stop-Loss**: Set at the lowest low of the last 100 candles (or 5% below entry if calculation fails).
+4. **Stop-Loss**: Set at the lowest low of the last 200 candles (or 5% below entry if calculation fails).
 
 ## Risk Management
 - Dynamic position sizing (configurable percentage of available USDT)
