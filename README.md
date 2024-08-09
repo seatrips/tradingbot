@@ -45,18 +45,18 @@ pip install ccxt pandas numpy pytz
 1. Edit `config.json` with your Phemex API credentials and desired settings:
 ```json
 {
-  "api_key": "your_api_key_here",
-  "secret_key": "your_secret_key_here",
+  "api_key": "YOUR_API_KEY",
+  "secret_key": "YOUR_API_KEY_SECRET",
   "trading_pair": "BTC/USDT",
   "base_currency": "BTC",
   "quote_currency": "USDT",
-  "timeframes": ["5m", "15m", "1h"],
+  "timeframes": ["1m", "5m", "15m"],
   "position_size": 0.8,
   "sleep_time": 60,
-  "error_sleep_time": 300,
-  "pause_start": "23:00",
-  "pause_end": "01:00",
-  "timezone": "UTC"
+  "error_sleep_time": 30,
+  "pause_start": "02:00",
+  "pause_end": "04:00",
+  "timezone": "Europe/Amsterdam"
 }
 ```
 
